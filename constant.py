@@ -1,0 +1,1 @@
+file_path = "data/oil_stocks_cleaned.parquet"
