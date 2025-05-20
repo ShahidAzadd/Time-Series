@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from statsmodels.tsa.arima.model import ARIMA
 
 from statsmodels.tsa.ar_model import AutoReg 
+from scipy.optimize import minimize
 
 
 class ARIMAFamily:
@@ -52,82 +53,76 @@ class ARIMAFamily:
         return train_df, test_df
     
 
-    def fit_AutoReg(self, x_train, lags):
-        """
-        Fit the ARIMA model to the data.
-        """
-        model = AutoReg(x_train,lags=lags)
-        self.model_fit = model.fit()
 
-    def fit_MovAvg(self, x_train, q):
-        """
-        Fit the ARIMA model to the data.
-        """
-        model = ARIMA(x_train, order=(0,0,q))
-        self.model_fit = model.fit()
-
-    def fit_model(self, model_class, x_train, **kwargs):
+    def fit_model(self, model_class, train_df, **kwargs):
         """
         Fit a time series model to the data.
 
         Parameters:
         - model_class: The class of the model to be used (e.g., AutoReg, ARIMA).
-        - x_train: Training data.
+        - train_df: Training data.
         - kwargs: Additional keyword arguments for the model.
 
         Example:
-        - For AutoReg: fit_model(AutoReg, x_train, lags=lags)
-        - For ARIMA: fit_model(ARIMA, x_train, order=(p, d, q))
+        - For AutoReg: fit_model(AutoReg, train_df, lags=lags)
+        - For ARIMA: fit_model(ARIMA, train_df, order=(p, d, q))
         """
-        model = model_class(x_train, **kwargs)
+        model = model_class(train_df, **kwargs)
         self.model_fit = model.fit()
 
-    def optimization(self, x_train):
+    def optimization(self, model_class,train_df,sub_train_df,val_df, **kwargs):
         """
-        Optimize the ARIMA model parameters.
+        Optimize the ARIMA model parameters using scipy.optimize.minimize.
         """
-        x_subtrain, x_valid = self.train_test_split(x_train, 'count', 10)
+        def objective(order):
+            # Ensure order values are integers and within reasonable bounds
+            try:
+                self.fit_model(model_class,sub_train_df,**kwargs)
+                _,mse = self.predict(sub_train_df, val_df)
+                return mse
+            except Exception:
+                return np.inf  # Penalize failed fits
 
-        best_aic = float('inf')
-        best_order = None
-        best_model = None
+        # Initial guess
+        initial_order = [1, 0, 1]
+        # Bounds for p, d, q
+        bounds = [(0, 15), (0, 2), (0, 15)]
 
-        for p in range(0, 3):
-            for d in range(0, 2):
-                for q in range(0, 3):
-                    try:
-                        model = ARIMA(x_train, order=(p,d,q))
-                        model_fit = model.fit(disp=0)
-                        if model_fit.aic < best_aic:
-                            best_aic = model_fit.aic
-                            best_order = (p,d,q)
-                            best_model = model_fit
-                    except:
-                        continue
+        result = minimize(objective, initial_order, bounds=bounds, method='L-BFGS-B')
+        self.best_order = tuple(int(round(x)) for x in result.x)
+        print(self.best_order)
 
-        self.model_fit = best_model
+        # Fit the best model
+        self.model_fit = ARIMA(train_df, order=self.best_order).fit()
         return self.model_fit    
 
-    def predict(self, x_train, x_test):
+    def predict(self, train_df=None, test_df=None, method=None,steps=None):
         """
         Predict future values using the fitted model.
         """
+
+        if method == 'forecast':
+            if self.model_fit is None:
+                raise ValueError("Model has not been fitted yet.")
+            predictions = self.model_fit.forecast(steps=steps)
+            return predictions
+        
         predictions = self.model_fit.predict(
-            start = len(x_train),
-            end   = len(x_train) + len(x_test) - 1,
+            start = len(train_df),
+            end   = len(train_df) + len(test_df) - 1,
             dynamic = False
         )
 
-        mse, rmse, mape, mae, r2 = self.evaluate(x_test, predictions)
+        mse, rmse, mape, mae, r2 = self.evaluate(test_df, predictions)
         self.error_df = pd.DataFrame()
         self.error_df['predictions'] = predictions
-        self.error_df['actual'] = x_test
+        self.error_df['actual'] = test_df
         self.error_df['mse'] = mse
         self.error_df['rmse'] = rmse
         self.error_df['mape'] = mape
         self.error_df['mae'] = mae
         self.error_df['r2%'] = r2 
-        return self.error_df
+        return self.error_df, mse
         
     def data_plotting(self):
         """
@@ -146,9 +141,10 @@ class ARIMAFamily:
         ax[1].set_title('Actual vs Forecast')
         ax[1].set_xlabel('Date')
         ax[1].set_ylabel('target value')
-        ax[1].set_xticklabels(self.data.index,rotation=90)
+        ax[1].set_xticklabels(self.error_df.index,rotation=90)
         ax[1].legend()
-        ax[2].bar([i for i in self.error_df.columns if i in ['mse', 'rmse', 'mape', 'mae', 'r2%']],list(self.error_df[['mse', 'rmse', 'mape', 'mae', 'r2%']].values[0]))
+        ax[2].bar([i for i in self.error_df.columns if i in ['mse', 'rmse', 'mape', 'mae', 'r2%']],
+                  list(self.error_df[['mse', 'rmse', 'mape', 'mae', 'r2%']].values[0]))
         ax[2].set_title('Error Metrics')
         ax[2].set_xlabel('xlabel')
         ax[2].set_ylabel('Error Value')
@@ -157,13 +153,34 @@ class ARIMAFamily:
         plt.show()   
 
 
-    def evaluate(self, x_test, predictions):
+    def evaluate(self, test_df, predictions):
         """
         Evaluate the model using test data.
         """
-        mse = mean_squared_error(x_test, predictions)
+        mse = mean_squared_error(test_df, predictions)
         rmse = np.sqrt(mse)
-        mape = mean_absolute_percentage_error(x_test, predictions) *100
-        mae = mean_absolute_error(x_test, predictions)
-        r2 = r2_score(x_test, predictions) *100
+        mape = mean_absolute_percentage_error(test_df, predictions) *100
+        mae = mean_absolute_error(test_df, predictions)
+        r2 = r2_score(test_df, predictions) *100
         return mse, rmse, mape, mae, r2
+    
+    def forecast(self,model_class,data, steps):
+        """
+        Forecast future values using the best model
+        """
+        method = 'forecast'
+        self.fit_model(model_class, data ,order = self.best_order)
+        forecast = self.predict(method=method,steps=steps)
+        forecast_df = pd.DataFrame(forecast, columns=['Forecast'])
+        forecast_df.index = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=steps, freq='D')
+        plt.plot(data.index, data.values, label='Original', color='blue')
+        plt.plot(forecast_df.index, forecast_df['Forecast'], label='Forecast', color='orange')
+        plt.title('Forecast vs Original')
+        plt.legend()
+        plt.xticks(rotation=90)
+        plt.xlabel('Date')
+        plt.ylabel('Forecasted Value')
+        plt.show()
+        return forecast_df
+        
+    
