@@ -3,9 +3,7 @@ import numpy as np
 from sklearn.metrics import mean_squared_error,mean_absolute_percentage_error
 from sklearn.metrics  import mean_absolute_error,r2_score
 import matplotlib.pyplot as plt
-from statsmodels.tsa.arima.model import ARIMA
-
-from statsmodels.tsa.ar_model import AutoReg 
+import optuna
 from scipy.optimize import minimize
 
 
@@ -63,38 +61,87 @@ class ARIMAFamily:
         - train_df: Training data.
         - kwargs: Additional keyword arguments for the model.
 
-        Example:
+        Example:s
         - For AutoReg: fit_model(AutoReg, train_df, lags=lags)
         - For ARIMA: fit_model(ARIMA, train_df, order=(p, d, q))
         """
         model = model_class(train_df, **kwargs)
         self.model_fit = model.fit()
 
-    def optimization(self, model_class,train_df,sub_train_df,val_df, **kwargs):
+    def optimization_(self, model_class,train_df,sub_train_df,val_df, **kwargs):
         """
         Optimize the ARIMA model parameters using scipy.optimize.minimize.
         """
-        def objective(order):
+        def objective(lags):
             # Ensure order values are integers and within reasonable bounds
             try:
                 self.fit_model(model_class,sub_train_df,**kwargs)
                 _,mse = self.predict(sub_train_df, val_df)
                 return mse
             except Exception:
+                print("Error in fitting model with order:", lags)
                 return np.inf  # Penalize failed fits
 
         # Initial guess
-        initial_order = [1, 0, 1]
+        initial_order = [1, 0, 10]
         # Bounds for p, d, q
-        bounds = [(0, 15), (0, 2), (0, 15)]
+        bounds = [(0, 15), (0, 2), (0, 150)]
 
-        result = minimize(objective, initial_order, bounds=bounds, method='L-BFGS-B')
+        result = minimize(objective, initial_order, bounds=bounds, method='BFGS')
         self.best_order = tuple(int(round(x)) for x in result.x)
         print(self.best_order)
 
         # Fit the best model
-        self.model_fit = ARIMA(train_df, order=self.best_order).fit()
-        return self.model_fit    
+        self.fit_model(model_class, train_df, **kwargs)
+        return self.model_fit   
+
+
+
+    def optimization(self, model_class,train_df,sub_train_df,val_df):
+        """
+        Generalized optimization for time series models.
+
+        Parameters:
+        - model_class: Model class (e.g., ARIMA, AutoReg)
+        - train_df: Full training data
+        - sub_train_df: Subset for fitting during optimization
+        - val_df: Validation set for scoring
+        - param_names: List of parameter names to optimize (e.g., ['order'] or ['lags'])
+        - initial_guess: Initial guess for parameters (list)
+        - bounds: Bounds for parameters (list of tuples)
+        - kwargs: Other fixed keyword arguments for the model
+        """
+        def objective(trial):
+            # Suggest integers for ARIMA(p,d,q)
+            if model_class.__name__ == 'ARIMA':
+                    
+                p = trial.suggest_int('p', 0,20)
+                d = trial.suggest_int('d', 0, 3)
+                q = trial.suggest_int('q', 0, 20)
+                self.fit_model(model_class,sub_train_df,order = (p,d,q))
+
+
+            try:
+                _,mse  = self.predict(sub_train_df,val_df )
+                return mse
+            except Exception as e:
+                # Fail the trial if ARIMA fails
+                raise optuna.exceptions.TrialPruned()
+
+        # Run Optuna study
+        study = optuna.create_study(direction='minimize')
+        study.optimize(objective, n_trials=20, timeout=100)  # 50 trials or 5 minutes
+
+        # Print the best result
+        print("Best ARIMA order:", study.best_params)
+        self.best_order = study.best_params
+        print("Best MSE:", study.best_value)
+
+
+        self.fit_model(model_class,train_df,order = (study.best_params['p'], study.best_params['d'], study.best_params['q']))
+        return self.model_fit
+    
+
 
     def predict(self, train_df=None, test_df=None, method=None,steps=None):
         """
@@ -122,7 +169,8 @@ class ARIMAFamily:
         self.error_df['mape'] = mape
         self.error_df['mae'] = mae
         self.error_df['r2%'] = r2 
-        return self.error_df, mse
+
+        return self.error_df,mse
         
     def data_plotting(self):
         """
@@ -143,14 +191,16 @@ class ARIMAFamily:
         ax[1].set_ylabel('target value')
         ax[1].set_xticklabels(self.error_df.index,rotation=90)
         ax[1].legend()
-        ax[2].bar([i for i in self.error_df.columns if i in ['mse', 'rmse', 'mape', 'mae', 'r2%']],
-                  list(self.error_df[['mse', 'rmse', 'mape', 'mae', 'r2%']].values[0]))
+        metrics = [i for i in self.error_df.columns if i in ['mse', 'rmse', 'mape', 'mae', 'r2%']]
+        values = list(self.error_df[metrics].values[0])
+        bars = ax[2].bar(metrics, values)
+        # Annotate each bar with its value
+        ax[2].bar_label(bars, fmt='%.2f', padding=3)
         ax[2].set_title('Error Metrics')
-        ax[2].set_xlabel('xlabel')
+        ax[2].set_xlabel('Metric')
         ax[2].set_ylabel('Error Value')
-        ax[2].legend()
         plt.tight_layout()
-        plt.show()   
+        plt.show()  
 
 
     def evaluate(self, test_df, predictions):
@@ -169,9 +219,9 @@ class ARIMAFamily:
         Forecast future values using the best model
         """
         method = 'forecast'
-        self.fit_model(model_class, data ,order = self.best_order)
+        self.fit_model(model_class, data ,order = (self.best_order['p'], self.best_order['d'], self.best_order['q']))
         forecast = self.predict(method=method,steps=steps)
-        forecast_df = pd.DataFrame(forecast, columns=['Forecast'])
+        forecast_df = pd.DataFrame(forecast.values, columns=['Forecast'])
         forecast_df.index = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=steps, freq='D')
         plt.plot(data.index, data.values, label='Original', color='blue')
         plt.plot(forecast_df.index, forecast_df['Forecast'], label='Forecast', color='orange')
