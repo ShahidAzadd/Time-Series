@@ -4,8 +4,7 @@ from sklearn.metrics import mean_squared_error,mean_absolute_percentage_error
 from sklearn.metrics  import mean_absolute_error,r2_score
 import matplotlib.pyplot as plt
 import optuna
-from scipy.optimize import minimize
-
+from statsmodels.tsa.arima.model import ARIMA
 
 class ARIMAFamily:
     """
@@ -65,35 +64,11 @@ class ARIMAFamily:
         - For AutoReg: fit_model(AutoReg, train_df, lags=lags)
         - For ARIMA: fit_model(ARIMA, train_df, order=(p, d, q))
         """
+        if model_class == 'ARMA':
+            model_class = ARIMA
         model = model_class(train_df, **kwargs)
         self.model_fit = model.fit()
 
-    def optimization_(self, model_class,train_df,sub_train_df,val_df, **kwargs):
-        """
-        Optimize the ARIMA model parameters using scipy.optimize.minimize.
-        """
-        def objective(lags):
-            # Ensure order values are integers and within reasonable bounds
-            try:
-                self.fit_model(model_class,sub_train_df,**kwargs)
-                _,mse = self.predict(sub_train_df, val_df)
-                return mse
-            except Exception:
-                print("Error in fitting model with order:", lags)
-                return np.inf  # Penalize failed fits
-
-        # Initial guess
-        initial_order = [1, 0, 10]
-        # Bounds for p, d, q
-        bounds = [(0, 15), (0, 2), (0, 150)]
-
-        result = minimize(objective, initial_order, bounds=bounds, method='BFGS')
-        self.best_order = tuple(int(round(x)) for x in result.x)
-        print(self.best_order)
-
-        # Fit the best model
-        self.fit_model(model_class, train_df, **kwargs)
-        return self.model_fit   
 
 
 
@@ -113,12 +88,17 @@ class ARIMAFamily:
         """
         def objective(trial):
             # Suggest integers for ARIMA(p,d,q)
-            if model_class.__name__ == 'ARIMA':
-                    
-                p = trial.suggest_int('p', 0,20)
-                d = trial.suggest_int('d', 0, 3)
-                q = trial.suggest_int('q', 0, 20)
-                self.fit_model(model_class,sub_train_df,order = (p,d,q))
+            if isinstance(model_class,str):
+                if model_class == 'ARMA':
+                    order = trial.suggest_categorical('order', [(p, d, q) for p in range(0, 21) for d in range(0, 1) for q in range(0, 21)])
+            elif model_class.__name__ == 'ARIMA':
+                order = trial.suggest_categorical('order', [(p, d, q) for p in range(0, 21) for d in range(0, 4) for q in range(0, 21)])
+                self.fit_model(model_class,sub_train_df,order = order)
+            elif model_class.__name__ == 'AutoReg':
+                lags = trial.suggest_int('lags', 1, 50)
+                self.fit_model(model_class,sub_train_df,lags=lags)
+            else:
+                raise ValueError("Unsupported model class for optimization")
 
 
             try:
@@ -137,8 +117,7 @@ class ARIMAFamily:
         self.best_order = study.best_params
         print("Best MSE:", study.best_value)
 
-
-        self.fit_model(model_class,train_df,order = (study.best_params['p'], study.best_params['d'], study.best_params['q']))
+        self.fit_model(model_class, train_df, **self.best_order)
         return self.model_fit
     
 
@@ -219,7 +198,7 @@ class ARIMAFamily:
         Forecast future values using the best model
         """
         method = 'forecast'
-        self.fit_model(model_class, data ,order = (self.best_order['p'], self.best_order['d'], self.best_order['q']))
+        self.fit_model(model_class, data ,**self.best_order)
         forecast = self.predict(method=method,steps=steps)
         forecast_df = pd.DataFrame(forecast.values, columns=['Forecast'])
         forecast_df.index = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=steps, freq='D')
