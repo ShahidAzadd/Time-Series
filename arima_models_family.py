@@ -18,6 +18,7 @@ class ARIMAFamily:
         self.data = data
         self.model_fit = None
         self.error_df = None
+        self.optimized = False
 
 
     def train_test_split(self,df, method, value):
@@ -86,14 +87,27 @@ class ARIMAFamily:
         - bounds: Bounds for parameters (list of tuples)
         - kwargs: Other fixed keyword arguments for the model
         """
+        self.optimized = True
         def objective(trial):
             # Suggest integers for ARIMA(p,d,q)
             if isinstance(model_class,str):
                 if model_class == 'ARMA':
                     order = trial.suggest_categorical('order', [(p, d, q) for p in range(0, 21) for d in range(0, 1) for q in range(0, 21)])
+
             elif model_class.__name__ == 'ARIMA':
                 order = trial.suggest_categorical('order', [(p, d, q) for p in range(0, 21) for d in range(0, 4) for q in range(0, 21)])
                 self.fit_model(model_class,sub_train_df,order = order)
+
+            elif model_class.__name__ == 'SARIMAX':
+                while True:
+                    try:
+                        order = trial.suggest_categorical('order', [(p, d, q) for p in range(0, 5) for d in range(0, 2) for q in range(0, 5)])
+                        seasonal_order = trial.suggest_categorical('seasonal_order', [(P, D, Q, s) for P in range(0, 15) for D in range(0, 2) for Q in range(0, 15) for s in range(1, 12)])
+                        self.fit_model(model_class,sub_train_df,order=order, seasonal_order=seasonal_order)
+                        break
+                    except ValueError:
+                        continue
+                
             elif model_class.__name__ == 'AutoReg':
                 lags = trial.suggest_int('lags', 1, 50)
                 self.fit_model(model_class,sub_train_df,lags=lags)
@@ -113,7 +127,7 @@ class ARIMAFamily:
         study.optimize(objective, n_trials=20, timeout=100)  # 50 trials or 5 minutes
 
         # Print the best result
-        print("Best ARIMA order:", study.best_params)
+        print("Best parameter:", study.best_params)
         self.best_order = study.best_params
         print("Best MSE:", study.best_value)
 
@@ -193,12 +207,15 @@ class ARIMAFamily:
         r2 = r2_score(test_df, predictions) *100
         return mse, rmse, mape, mae, r2
     
-    def forecast(self,model_class,data, steps):
+    def forecast(self,model_class,data, steps, **kwargs):
         """
         Forecast future values using the best model
         """
         method = 'forecast'
-        self.fit_model(model_class, data ,**self.best_order)
+        # if self.optimized == False:
+        self.fit_model(model_class, data ,**kwargs)
+        # else:
+            # self.fit_model(model_class, data ,**self.best_order)
         forecast = self.predict(method=method,steps=steps)
         forecast_df = pd.DataFrame(forecast.values, columns=['Forecast'])
         forecast_df.index = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=steps, freq='D')
@@ -211,5 +228,25 @@ class ARIMAFamily:
         plt.ylabel('Forecasted Value')
         plt.show()
         return forecast_df
+    
+    def save_model(self, filename):
+        """
+        Save the fitted model to a file.
+        """
+        if self.model_fit is None:
+            raise ValueError("Model has not been fitted yet.")
+        self.model_fit.save(filename)
+        print(f"Model saved to {filename}")
+    
+    def load_model(self, filename):
+        """
+        Load a fitted model from a file.
+        """
+        from statsmodels.tsa.arima.model import ARIMAResults
+        self.model_fit = ARIMAResults.load(filename)
+        print(f"Model loaded from {filename}")
+        self.optimized = True
+        print("Model is now ready for predictions.")
+        return self.model_fit
         
     
