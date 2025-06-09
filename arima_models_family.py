@@ -52,7 +52,7 @@ class ARIMAFamily:
     
 
 
-    def fit_model(self, model_class, train_df, **kwargs):
+    def fit_model(self, model_class, train_df,date_col=None,target_col=None,**kwargs):
         """
         Fit a time series model to the data.
 
@@ -67,8 +67,17 @@ class ARIMAFamily:
         """
         if model_class == 'ARMA':
             model_class = ARIMA
-        model = model_class(train_df, **kwargs)
-        self.model_fit = model.fit()
+
+        elif model_class.__name__ == 'Prophet':
+            train_df.reset_index(inplace=True)
+            train_df.rename(columns={date_col: 'ds', target_col: 'y'}, inplace=True)
+            model = model_class(**kwargs)
+            model.fit(train_df)
+            self.model_fit = model
+            
+        else:
+            model = model_class(train_df, **kwargs)
+            self.model_fit = model.fit()
 
 
 
